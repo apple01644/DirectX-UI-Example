@@ -4,6 +4,7 @@
 #include "Common/UploadBuffer.h"
 #include "Common/GeometryGenerator.h"
 #include "FrameResource.h"
+#include "YTML1_1.hpp"
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -13,8 +14,10 @@ using namespace DirectX::PackedVector;
 #pragma comment(lib, "D3D12.lib")
 #include <random>
 #include <time.h>
+#include <DirectXMath.h>
 
 const int gNumFrameResources = 3;
+void OutputDebugStringA(const std::string& s) { OutputDebugStringA(s.c_str()); }
 
 struct RenderItem
 {
@@ -86,6 +89,8 @@ private:
     void BuildRenderItems();
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList);
 
+	void Brushing(const XMFLOAT2& pos, const float& range);
+
 	std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
 
@@ -106,7 +111,9 @@ private:
 	std::unordered_map<std::string, ComPtr<ID3DBlob>> mShaders;
 	std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> mPSOs;
 
-    std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
+	std::unordered_map<std::string, std::string> mStyle;
+
+	std::unordered_map<std::string, std::vector<D3D12_INPUT_ELEMENT_DESC>> mInputLayout;
  
 	// List of all the render items.
 	std::unordered_map<std::string, std::unique_ptr<RenderItem>> mRitems;
@@ -129,6 +136,10 @@ private:
 	std::mt19937_64 mt = std::mt19937_64(time(nullptr));
 
     POINT mLastMousePos;
+	UINT mLastMouseState = 0;
+
+	YTML1_1::Tree mYTMLTree;
+	size_t UICBSize = 0;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance,
@@ -203,6 +214,10 @@ void BlendApp::OnResize()
 {
     D3DApp::OnResize();
 
+	mYTMLTree->eid = 0;
+	mYTMLTree->size = { (float)mClientWidth, (float)mClientHeight };
+	mYTMLTree->flags = 0;
+
     // The window resized, so update the aspect ratio and recompute the projection matrix.
     XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f*MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
     XMStoreFloat4x4(&mProj, P);
@@ -210,15 +225,41 @@ void BlendApp::OnResize()
 
 void BlendApp::Update(const GameTimer& gt)
 {
+	if ((GetKeyState(VK_LBUTTON) & 0x100) != 0)
+	{
+		XMFLOAT4 pos = { -19.921875, 0.f, -19.921875, 1.f };
+		XMVECTOR v = XMVector4Transform(XMVectorSet(pos.x, pos.y, pos.z, pos.w), mViewProj);
+		XMStoreFloat4(&pos, v);
+		XMFLOAT2 npos_start = { (pos.x / pos.w + 1.f) / 2.f * mClientWidth, (-pos.y / pos.w + 1.f) / 2.f * mClientHeight };
+
+		pos = { 19.921875, 0.f, 19.921875, 1.f };
+		v = XMVector4Transform(XMVectorSet(pos.x, pos.y, pos.z, pos.w), mViewProj);
+		XMStoreFloat4(&pos, v);
+		XMFLOAT2 npos_end = { (pos.x / pos.w + 1.f) / 2.f * mClientWidth, (-pos.y / pos.w + 1.f) / 2.f * mClientHeight };
+
+		XMFLOAT4 rect = { npos_start.x, npos_start.y, npos_end.x - npos_start.x, npos_end.y - npos_start.y };
+		if (rect.z < 0) {
+			rect.x += rect.z;
+			rect.z = -rect.z;
+		}
+		if (rect.w < 0) {
+			rect.y += rect.w;
+			rect.w = -rect.w;
+		}
+
+		if (mLastMousePos.x >= rect.x && mLastMousePos.y >= rect.y && mLastMousePos.x <= rect.x + rect.z && mLastMousePos.y <= rect.y + rect.w) {
+			XMFLOAT2 nmp = { (mLastMousePos.x - rect.x) / rect.z, 1 - (mLastMousePos.y - rect.y) / rect.w };
+
+			Brushing(nmp, 9);
+		}
+	}
+
     OnKeyboardInput(gt);
 	UpdateCamera(gt);
 
-    // Cycle through the circular frame resource array.
     mCurrFrameResourceIndex = (mCurrFrameResourceIndex + 1) % gNumFrameResources;
     mCurrFrameResource = mFrameResources[mCurrFrameResourceIndex].get();
 
-    // Has the GPU finished processing the commands of the current frame resource?
-    // If not, wait until the GPU has completed commands up to this fence point.
     if(mCurrFrameResource->Fence != 0 && mFence->GetCompletedValue() < mCurrFrameResource->Fence)
     {
         HANDLE eventHandle = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
@@ -235,9 +276,6 @@ void BlendApp::Update(const GameTimer& gt)
 	for (size_t i = 0; i < MapV.size(); ++i) {
 		auto& v = MapV[i];
 
-		//v.Geo0.x = sinf(sqrtf(powf(v.x - 127.5f, 2) + powf(v.y - 127.5f, 2)) / 10.f - gt.TotalTime() * 2.f + sin(gt.TotalTime() + atan2f(v.x - 127.5f, v.y - 127.5f) * 5.f) * 3.f) / 2.f + 0.5f;
-		//v.Geo0.y = 1 - v.Geo0.x;
-
 		MapVB->CopyData(i, v);
 	}
 }
@@ -252,7 +290,7 @@ void BlendApp::Draw(const GameTimer& gt)
 
     // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
     // Reusing the command list reuses memory.
-    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mPSOs["opaque"].Get()));
+    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mPSOs["UI"].Get()));
 
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
@@ -272,6 +310,8 @@ void BlendApp::Draw(const GameTimer& gt)
 	mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
 	mCommandList->SetGraphicsRootSignature(mRootSignature["Map"].Get());
+
+	
 
     DrawRenderItems(mCommandList.Get());//, mRitemLayer[(int)RenderLayer::Opaque]
 
@@ -308,7 +348,22 @@ void BlendApp::Draw(const GameTimer& gt)
 
 void BlendApp::OnMouseDown(WPARAM btnState, int x, int y)
 {
-	
+	if ((btnState & MK_LBUTTON) != 0)
+	{
+		bool run = true;
+		YTML1_1::RawLoopTree_RL(
+			[&](YTML1_1::Element& e, bool& run) {
+				if (e.flags & ElementFlag::Enable)
+				{
+					if (x >= e.size_in_display.x && y >= e.size_in_display.y && x <= e.size_in_display.x + e.size_in_display.w && y <= e.size_in_display.y + e.size_in_display.h)
+					{
+						e.background_color = (XMFLOAT4)Colors::Red;
+						run = false;
+					}
+				}
+			}
+		, mYTMLTree, run);
+	}
 
     mLastMousePos.x = x;
     mLastMousePos.y = y;
@@ -318,81 +373,63 @@ void BlendApp::OnMouseDown(WPARAM btnState, int x, int y)
 
 void BlendApp::OnMouseUp(WPARAM btnState, int x, int y)
 {
+	//if ((btnState & MK_LBUTTON) != 0)
+	{
+		bool run = true;
+		YTML1_1::RawLoopTree_RL(
+			[&](YTML1_1::Element& e, bool& run) {
+				if (e.flags & ElementFlag::Enable)
+				{
+					if (x >= e.size_in_display.x && y >= e.size_in_display.y && x <= e.size_in_display.x + e.size_in_display.w && y <= e.size_in_display.y + e.size_in_display.h)
+					{
+						e.background_color = (XMFLOAT4)Colors::Blue;
+						run = false;
+					}
+				}
+			}
+		, mYTMLTree, run);
+	}
+
     ReleaseCapture();
+}
+
+void BlendApp::Brushing(const XMFLOAT2& pos, const float& range)
+{
+	size_t min_x = 0, max_x = 256, min_y = 0, max_y = 256;
+
+	if (pos.x * 255 - range > 0) min_x = (size_t)(pos.x * 255 - range);
+	if (pos.y * 255 - range > 0) min_y = (size_t)(pos.y * 255 - range);
+
+	if (pos.x * 255 + range < 256) max_x = (size_t)(pos.x * 255 + range);
+	if (pos.y * 255 + range < 256) max_y = (size_t)(pos.y * 255 + range);
+
+	for (size_t _x = min_x; _x < max_x; ++_x)
+	{
+		for (size_t _y = min_y; _y < max_y; ++_y)
+		{
+			auto& v = MapV[_y + _x * 256];
+			float dist = sqrtf(powf(v.x - pos.x * 255, 2) + powf(v.y - pos.y * 255, 2));
+			if (dist <= 9)
+			{
+				float* geo = (float*)& v.Geo;
+				geo[brushMode] += 1.f - dist / range;
+				float all = 0;
+				for (int i = 0; i < MapTexture::size; ++i) all += geo[i];
+				for (int i = 0; i < MapTexture::size; ++i) geo[i] /= all;
+			}
+		}
+	}
 }
 
 void BlendApp::OnMouseMove(WPARAM btnState, int x, int y)
 {
     if((btnState & MK_LBUTTON) != 0)
     {
-		{
-			XMFLOAT4 pos = { -19.921875, 0.f, -19.921875, 1.f };
-			XMVECTOR v = XMVector4Transform(XMVectorSet(pos.x, pos.y, pos.z, pos.w), mViewProj);
-			XMStoreFloat4(&pos, v);
-			XMFLOAT2 npos_start = { (pos.x / pos.w + 1.f) / 2.f * mClientWidth, (-pos.y / pos.w + 1.f) / 2.f * mClientHeight };
-
-			pos = { 19.921875, 0.f, 19.921875, 1.f };
-			v = XMVector4Transform(XMVectorSet(pos.x, pos.y, pos.z, pos.w), mViewProj);
-			XMStoreFloat4(&pos, v);
-			XMFLOAT2 npos_end = { (pos.x / pos.w + 1.f) / 2.f * mClientWidth, (-pos.y / pos.w + 1.f) / 2.f * mClientHeight };
-
-			XMFLOAT4 rect = { npos_start.x, npos_start.y, npos_end.x - npos_start.x, npos_end.y - npos_start.y };
-			if (rect.z < 0) {
-				rect.x += rect.z;
-				rect.z = -rect.z;
-			}
-			if (rect.w < 0) {
-				rect.y += rect.w;
-				rect.w = -rect.w;
-			}
-
-			if (x >= rect.x && y >= rect.y && x <= rect.x + rect.z && y <= rect.y + rect.w) {
-				//char buf[256];
-				XMFLOAT2 nmp = { (x - rect.x) / rect.z, 1 - (y - rect.y) / rect.w };
-				//sprintf_s(buf, "%f, %f\n", nmp.x, nmp.y);
-				//OutputDebugStringA(buf);
-
-				for (size_t i = 0; i < MapV.size(); ++i) {
-					auto& v = MapV[i];
-					float dist = sqrtf(powf(v.x - nmp.x * 255, 2) + powf(v.y - nmp.y * 255, 2));
-					if (dist <= 9) {
-						float* geo = (float*)& v.Geo;
-						geo[brushMode] += 1.f - dist / 9.f;
-						float all = 0;
-						for (int i = 0; i < MapTexture::size; ++i) all += geo[i];
-						for (int i = 0; i < MapTexture::size; ++i) geo[i] /= all;
-					}					
-
-				}
-			}
-		}
-
-        // Make each pixel correspond to a quarter of a degree.
-        float dx = XMConvertToRadians(0.25f*static_cast<float>(x - mLastMousePos.x));
-        float dy = XMConvertToRadians(0.25f*static_cast<float>(y - mLastMousePos.y));
-
-        // Update angles based on input to orbit camera around box.
-        mTheta += dx;
-        mPhi += dy;
-
-        // Restrict the angle mPhi.
-        MathHelper::Clamp(mPhi, 0.00000f, MathHelper::Pi - 0.000001f);
-    }
-    else if((btnState & MK_RBUTTON) != 0)
-    {
-        // Make each pixel correspond to 0.2 unit in the scene.
-        float dx = 0.2f*static_cast<float>(x - mLastMousePos.x);
-        float dy = 0.2f*static_cast<float>(y - mLastMousePos.y);
-
-        // Update the camera radius based on input.
-        mRadius += dx - dy;
-
-        // Restrict the radius.
-        MathHelper::Clamp(mRadius, 5.0f, 150.0f);
     }
 
     mLastMousePos.x = x;
     mLastMousePos.y = y;
+	mLastMouseState = btnState;
 }
 
 void BlendApp::OnKeyDown(WPARAM p) 
@@ -486,6 +523,52 @@ void BlendApp::UpdateObjectCBs(const GameTimer& gt)
 			e.second->NumFramesDirty--;
 		}
 	}
+	auto currUICB = mCurrFrameResource->UICB.get();
+
+	size_t i = 0;
+
+	YTML1_1::RunYTML1_1(mYTMLTree,
+		[&](YTML1_1::Element & e, bool& run) {
+			if (e.flags & ElementFlag::Enable)
+			{
+				//Border and Body
+				if (e.border.left != 0 || e.border.top != 0 || e.border.bottom != 0 || e.border.right != 0)
+				{
+					UIConsts c;
+					XMStoreFloat4x4(&c.World,
+						XMMatrixScaling(e.size_in_display.w, e.size_in_display.h, 0) +
+						XMMatrixTranslation(e.size_in_display.x, e.size_in_display.y, 0)
+					);
+
+					c.Color = e.border_color;
+					currUICB->CopyData(i++, c);
+
+					XMStoreFloat4x4(&c.World,
+						XMMatrixScaling(e.size_in_display.w - e.border.left - e.border.right, e.size_in_display.h - e.border.top - e.border.bottom, 0) +
+						XMMatrixTranslation(e.size_in_display.x + e.border.left, e.size_in_display.y + e.border.top, 0)
+					);
+
+					c.Color = e.background_color;
+					currUICB->CopyData(i++, c);
+				}
+				else
+				//Only Body
+				{
+					UIConsts c;
+					XMStoreFloat4x4(&c.World,
+						XMMatrixScaling(e.size_in_display.w, e.size_in_display.h, 0) +
+						XMMatrixTranslation(e.size_in_display.x, e.size_in_display.y, 0)
+					);
+
+					c.Color = e.background_color;
+					currUICB->CopyData(i++, c);
+				}
+
+			}
+		}
+	);
+	
+	UICBSize = i;
 }
 
 void BlendApp::UpdateMaterialCBs(const GameTimer& gt)
@@ -583,40 +666,66 @@ void BlendApp::LoadTextures()
 
 void BlendApp::BuildRootSignature()
 {
-	
-	CD3DX12_DESCRIPTOR_RANGE texTable;
-	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0);
-
-	// Root parameter can be a table, root descriptor or root constants.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[3];
-
-	// Perfomance TIP: Order from most frequent to least frequent.
-	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
-	slotRootParameter[1].InitAsConstantBufferView(0);
-	slotRootParameter[2].InitAsConstantBufferView(1);
-
 
 	auto staticSamplers = GetStaticSamplers();
+	{
 
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter,
-		(UINT)staticSamplers.size(), staticSamplers.data(),
-		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+		CD3DX12_DESCRIPTOR_RANGE texTable;
+		texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0);
 
-	ComPtr<ID3DBlob> serializedRootSig = nullptr;
-	ComPtr<ID3DBlob> errorBlob = nullptr;
-	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+		// Root parameter can be a table, root descriptor or root constants.
+		CD3DX12_ROOT_PARAMETER slotRootParameter[3];
 
-	if (errorBlob != nullptr) ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+		// Perfomance TIP: Order from most frequent to least frequent.
+		slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
+		slotRootParameter[1].InitAsConstantBufferView(0);
+		slotRootParameter[2].InitAsConstantBufferView(1);
 
-	ThrowIfFailed(hr);
 
-	ThrowIfFailed(md3dDevice->CreateRootSignature(
-		0,
-		serializedRootSig->GetBufferPointer(),
-		serializedRootSig->GetBufferSize(),
-		IID_PPV_ARGS(mRootSignature["Map"].GetAddressOf())));
-	
+		CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter,
+			(UINT)staticSamplers.size(), staticSamplers.data(),
+			D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+		ComPtr<ID3DBlob> serializedRootSig = nullptr;
+		ComPtr<ID3DBlob> errorBlob = nullptr;
+		HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+			serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+		if (errorBlob != nullptr) ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+
+		ThrowIfFailed(hr);
+
+		ThrowIfFailed(md3dDevice->CreateRootSignature(
+			0,
+			serializedRootSig->GetBufferPointer(),
+			serializedRootSig->GetBufferSize(),
+			IID_PPV_ARGS(mRootSignature["Map"].GetAddressOf())));
+	}
+	{
+		CD3DX12_ROOT_PARAMETER slotRootParameter[2];
+		slotRootParameter[0].InitAsConstantBufferView(0);
+		slotRootParameter[1].InitAsConstantBufferView(1);
+
+
+		CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter,
+			(UINT)staticSamplers.size(), staticSamplers.data(),
+			D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+		ComPtr<ID3DBlob> serializedRootSig = nullptr;
+		ComPtr<ID3DBlob> errorBlob = nullptr;
+		HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+			serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+		if (errorBlob != nullptr) ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+
+		ThrowIfFailed(hr);
+
+		ThrowIfFailed(md3dDevice->CreateRootSignature(
+			1,
+			serializedRootSig->GetBufferPointer(),
+			serializedRootSig->GetBufferSize(),
+			IID_PPV_ARGS(mRootSignature["UI"].GetAddressOf())));
+	}
 }
 
 void BlendApp::BuildDescriptorHeaps()
@@ -661,18 +770,19 @@ void BlendApp::BuildDescriptorHeaps()
 
 void BlendApp::BuildShadersAndInputLayout()
 {
-	std::string str = std::to_string(mMainPassCB.gMatirialSize).c_str();
 
 	const D3D_SHADER_MACRO defines[] =
 	{
-		"MAX_MATERIAL", str.c_str(),
 		NULL, NULL
 	};
 
-	mShaders["MapVS"] = d3dUtil::CompileShader(L"Shaders\\Map.hlsl", defines, "VS", "vs_5_1");
-	mShaders["MapPS"] = d3dUtil::CompileShader(L"Shaders\\Map.hlsl", defines, "PS", "ps_5_1");
+	mShaders["MapVS"] = d3dUtil::CompileShader(L"Shaders\\Map.hlsl", nullptr, "VS", "vs_5_1");
+	mShaders["MapPS"] = d3dUtil::CompileShader(L"Shaders\\Map.hlsl", nullptr, "PS", "ps_5_1");
 	
-    mInputLayout =
+	mShaders["UIVS"] = d3dUtil::CompileShader(L"Shaders\\UI.hlsl", nullptr, "VS", "vs_5_1");
+	mShaders["UIPS"] = d3dUtil::CompileShader(L"Shaders\\UI.hlsl", nullptr, "PS", "ps_5_1");
+	
+    mInputLayout["Map"] =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0 + 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12 + 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -680,6 +790,11 @@ void BlendApp::BuildShadersAndInputLayout()
 		{ "GEO_FIRST", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32 + 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "GEO_SECOND", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 48 + 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
+	mInputLayout["UI"] =
+	{
+		{ "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }//,
+		//{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+	};
 }
 
 void BlendApp::BuildWavesGeometry()
@@ -753,85 +868,177 @@ void BlendApp::BuildWavesGeometry()
 
 void BlendApp::BuildBoxGeometry()
 {
-	GeometryGenerator geoGen;
-	GeometryGenerator::MeshData box = geoGen.CreateBox(8.0f, 8.0f, 8.0f, 3);
-
-	std::vector<Vertex> vertices(box.Vertices.size());
-	for (size_t i = 0; i < box.Vertices.size(); ++i)
 	{
-		auto& p = box.Vertices[i].Position;
-		vertices[i].Pos = p;
-		vertices[i].Normal = box.Vertices[i].Normal;
-		vertices[i].TexC = box.Vertices[i].TexC;
+		GeometryGenerator geoGen;
+		GeometryGenerator::MeshData box = geoGen.CreateBox(8.0f, 8.0f, 8.0f, 3);
+
+		std::vector<Vertex> vertices(box.Vertices.size());
+		for (size_t i = 0; i < box.Vertices.size(); ++i)
+		{
+			auto& p = box.Vertices[i].Position;
+			vertices[i].Pos = p;
+			vertices[i].Normal = box.Vertices[i].Normal;
+			vertices[i].TexC = box.Vertices[i].TexC;
+		}
+
+		const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+
+		std::vector<std::uint16_t> indices = box.GetIndices16();
+		const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
+
+		auto geo = std::make_unique<MeshGeometry>();
+		geo->Name = "boxGeo";
+
+		ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
+		CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), vertices.data(), vbByteSize);
+
+		ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
+		CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
+
+		geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+			mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
+
+		geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+			mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+		geo->VertexByteStride = sizeof(Vertex);
+		geo->VertexBufferByteSize = vbByteSize;
+		geo->IndexFormat = DXGI_FORMAT_R16_UINT;
+		geo->IndexBufferByteSize = ibByteSize;
+
+		SubmeshGeometry submesh;
+		submesh.IndexCount = (UINT)indices.size();
+		submesh.StartIndexLocation = 0;
+		submesh.BaseVertexLocation = 0;
+
+		geo->DrawArgs["box"] = submesh;
+
+		mGeometries["boxGeo"] = std::move(geo);
 	}
+	{
+		std::vector<UIPoint> vertices;
+		vertices.push_back({ XMFLOAT2(0, 0) });
+		vertices.push_back({ XMFLOAT2(0, 1) });
+		vertices.push_back({ XMFLOAT2(1, 0) });
+		vertices.push_back({ XMFLOAT2(1, 1) });
+		const UINT vbByteSize = (UINT)vertices.size() * sizeof(UIPoint);
 
-	const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+		std::vector<std::uint16_t> indices = {0, 1, 3, 0, 2, 3};
+		const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
 
-	std::vector<std::uint16_t> indices = box.GetIndices16();
-	const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
+		auto geo = std::make_unique<MeshGeometry>();
+		geo->Name = "rect";
 
-	auto geo = std::make_unique<MeshGeometry>();
-	geo->Name = "boxGeo";
+		ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
+		CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), vertices.data(), vbByteSize);
 
-	ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
-	CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), vertices.data(), vbByteSize);
+		ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
+		CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
 
-	ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
-	CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
+		geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+			mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
 
-	geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
-		mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
+		geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+			mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
 
-	geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
-		mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
+		geo->VertexByteStride = sizeof(UIPoint);
+		geo->VertexBufferByteSize = vbByteSize;
+		geo->IndexFormat = DXGI_FORMAT_R16_UINT;
+		geo->IndexBufferByteSize = ibByteSize;
 
-	geo->VertexByteStride = sizeof(Vertex);
-	geo->VertexBufferByteSize = vbByteSize;
-	geo->IndexFormat = DXGI_FORMAT_R16_UINT;
-	geo->IndexBufferByteSize = ibByteSize;
+		SubmeshGeometry submesh;
+		submesh.IndexCount = (UINT)indices.size();
+		submesh.StartIndexLocation = 0;
+		submesh.BaseVertexLocation = 0;
 
-	SubmeshGeometry submesh;
-	submesh.IndexCount = (UINT)indices.size();
-	submesh.StartIndexLocation = 0;
-	submesh.BaseVertexLocation = 0;
+		geo->DrawArgs["rect"] = submesh;
 
-	geo->DrawArgs["box"] = submesh;
-
-	mGeometries["boxGeo"] = std::move(geo);
+		mGeometries["rect"] = std::move(geo);
+	}
 }
 
 void BlendApp::BuildPSOs()
 {
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc;
-
-	//
-	// PSO for opaque objects.
-	//
-    ZeroMemory(&opaquePsoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
-	opaquePsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
-	opaquePsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-	opaquePsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	opaquePsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	opaquePsoDesc.SampleMask = UINT_MAX;
-	opaquePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	opaquePsoDesc.NumRenderTargets = 1;
-	opaquePsoDesc.RTVFormats[0] = mBackBufferFormat;
-	opaquePsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
-	opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
-	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
-
-	opaquePsoDesc.VS =
 	{
-		reinterpret_cast<BYTE*>(mShaders["MapVS"]->GetBufferPointer()),
-		mShaders["MapVS"]->GetBufferSize()
-	};
-	opaquePsoDesc.PS =
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC PsoDesc;
+		ZeroMemory(&PsoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
+		PsoDesc.InputLayout = { mInputLayout["Map"].data(), (UINT)mInputLayout["Map"].size() };
+		PsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+		PsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+		PsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+		PsoDesc.SampleMask = UINT_MAX;
+		PsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		PsoDesc.NumRenderTargets = 1;
+		PsoDesc.RTVFormats[0] = mBackBufferFormat;
+		PsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
+		PsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
+		PsoDesc.DSVFormat = mDepthStencilFormat;	
+
+		PsoDesc.VS =
+		{
+			reinterpret_cast<BYTE*>(mShaders["MapVS"]->GetBufferPointer()),
+			mShaders["MapVS"]->GetBufferSize()
+		};
+		PsoDesc.PS =
+		{
+			reinterpret_cast<BYTE*>(mShaders["MapPS"]->GetBufferPointer()),
+			mShaders["MapPS"]->GetBufferSize()
+		};
+		PsoDesc.pRootSignature = mRootSignature["Map"].Get();
+		ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&PsoDesc, IID_PPV_ARGS(&mPSOs["Map"])));
+	}
 	{
-		reinterpret_cast<BYTE*>(mShaders["MapPS"]->GetBufferPointer()),
-		mShaders["MapPS"]->GetBufferSize()
-	};
-	opaquePsoDesc.pRootSignature = mRootSignature["Map"].Get();
-	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mPSOs["Map"])));
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC PsoDesc;
+		ZeroMemory(&PsoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
+		PsoDesc.InputLayout = { mInputLayout["UI"].data(), (UINT)mInputLayout["UI"].size() };
+		PsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+
+		PsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+
+		D3D12_RENDER_TARGET_BLEND_DESC transparencyBlendDesc;
+		transparencyBlendDesc.BlendEnable = true;
+		transparencyBlendDesc.SrcBlend = D3D12_BLEND::D3D12_BLEND_SRC_ALPHA;
+		transparencyBlendDesc.DestBlend = D3D12_BLEND::D3D12_BLEND_INV_SRC_ALPHA;
+		transparencyBlendDesc.BlendOp = D3D12_BLEND_OP::D3D12_BLEND_OP_ADD;
+
+		transparencyBlendDesc.SrcBlendAlpha = D3D12_BLEND::D3D12_BLEND_ZERO;
+		transparencyBlendDesc.DestBlendAlpha = D3D12_BLEND::D3D12_BLEND_ONE;
+		transparencyBlendDesc.BlendOpAlpha = D3D12_BLEND_OP::D3D12_BLEND_OP_ADD;
+
+		transparencyBlendDesc.LogicOpEnable = false;
+		transparencyBlendDesc.LogicOp = D3D12_LOGIC_OP::D3D12_LOGIC_OP_NOOP;
+		transparencyBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE::D3D12_COLOR_WRITE_ENABLE_ALL;
+
+		PsoDesc.BlendState.RenderTarget[0] = transparencyBlendDesc;
+		PsoDesc.BlendState.AlphaToCoverageEnable = false;
+		PsoDesc.BlendState.IndependentBlendEnable = false;
+
+		PsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+		PsoDesc.SampleMask = UINT_MAX;
+		PsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		PsoDesc.NumRenderTargets = 1;
+		PsoDesc.RTVFormats[0] = mBackBufferFormat;
+		PsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
+		PsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
+		PsoDesc.DSVFormat = mDepthStencilFormat;
+		PsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE::D3D12_CULL_MODE_NONE;
+		//PsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+		PsoDesc.InputLayout = { mInputLayout["UI"].data(), (UINT)mInputLayout["UI"].size() };
+		PsoDesc.VS =
+		{
+			reinterpret_cast<BYTE*>(mShaders["UIVS"]->GetBufferPointer()),
+			mShaders["UIVS"]->GetBufferSize()
+		};
+		PsoDesc.PS =
+		{
+			reinterpret_cast<BYTE*>(mShaders["UIPS"]->GetBufferPointer()),
+			mShaders["UIPS"]->GetBufferSize()
+		};
+
+
+				PsoDesc.pRootSignature = mRootSignature["UI"].Get();
+		ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&PsoDesc, IID_PPV_ARGS(&mPSOs["UI"])));
+	}
 }
 
 void BlendApp::BuildFrameResources()
@@ -840,6 +1047,13 @@ void BlendApp::BuildFrameResources()
     {
         mFrameResources.push_back(std::make_unique<FrameResource>(md3dDevice.Get(), 1));
     }
+	
+	YTML1_1::ReadCSS("somestyle.css", mStyle);	
+
+	std::vector<std::string> keys;
+	
+	size_t muid = 1;
+	YTML1_1::ReadYTML1_1("sample.html", mYTMLTree, mStyle, muid);
 }
 
 void BlendApp::BuildMaterials()
@@ -921,32 +1135,56 @@ void BlendApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList)
 	auto passCB = mCurrFrameResource->PassCB->Resource();
 
     UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+	UINT uiCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(UIConsts));
     UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
 
 	auto objectCB = mCurrFrameResource->ObjectCB->Resource();
+	auto UICB = mCurrFrameResource->UICB->Resource();
 
-	auto& ri = mRitems["GROUND"];
+	{
+		auto& ri = mRitems["GROUND"];
 
-	mCommandList->SetPipelineState(mPSOs["Map"].Get());
-	mCommandList->SetComputeRootSignature(mRootSignature["Map"].Get());
-	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
+		mCommandList->SetPipelineState(mPSOs["Map"].Get());
+		mCommandList->SetGraphicsRootSignature(mRootSignature["Map"].Get());
+		mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
 
-	ri->Geo->VertexBufferGPU = MapVB->Resource();
+		ri->Geo->VertexBufferGPU = MapVB->Resource();
 
-	mCommandList->IASetVertexBuffers(0, 1, &ri->Geo->VertexBufferView());
-	mCommandList->IASetIndexBuffer(&ri->Geo->IndexBufferView());
-	mCommandList->IASetPrimitiveTopology(ri->PrimitiveType);
+		mCommandList->IASetVertexBuffers(0, 1, &ri->Geo->VertexBufferView());
+		mCommandList->IASetIndexBuffer(&ri->Geo->IndexBufferView());
+		mCommandList->IASetPrimitiveTopology(ri->PrimitiveType);
 
-	CD3DX12_GPU_DESCRIPTOR_HANDLE tex0(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
-	tex0.Offset(0, mCbvSrvDescriptorSize);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE tex0(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+		tex0.Offset(0, mCbvSrvDescriptorSize);
 
-	D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex * objCBByteSize;
+		D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex * objCBByteSize;
 
-	mCommandList->SetGraphicsRootDescriptorTable(0, tex0);
-	mCommandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
-	
-	mCommandList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
+		mCommandList->SetGraphicsRootDescriptorTable(0, tex0);
+		mCommandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
 
+		mCommandList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
+	}
+	{
+		const auto& geo = mGeometries.at("rect");
+		mCommandList->SetPipelineState(mPSOs["UI"].Get());
+		mCommandList->SetGraphicsRootSignature(mRootSignature["UI"].Get());
+		mCommandList->SetGraphicsRootConstantBufferView(1, passCB->GetGPUVirtualAddress());
+		
+		mCommandList->IASetVertexBuffers(0, 1, &geo->VertexBufferView());
+		mCommandList->IASetIndexBuffer(&geo->IndexBufferView());
+		mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+
+		//CD3DX12_GPU_DESCRIPTOR_HANDLE tex0(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+		//mCommandList->SetGraphicsRootDescriptorTable(0, tex0);
+		
+		const auto& arg = geo->DrawArgs.begin()->second;
+		for (size_t i = UICBSize - 1; i < UICBSize; --i)
+		{
+			mCommandList->SetGraphicsRootConstantBufferView(0, UICB->GetGPUVirtualAddress() + i * uiCBByteSize);
+			mCommandList->DrawIndexedInstanced(arg.IndexCount, 1, arg.StartIndexLocation, arg.BaseVertexLocation, 0);
+		}
+	}
     // For each render item...
     /*for(size_t i = 0; i < ritems.size(); ++i)
     {

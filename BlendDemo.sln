@@ -1,9 +1,11 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio 14
-VisualStudioVersion = 14.0.22823.1
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.28803.352
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "BlendDemo", "BlendDemo.vcxproj", "{5ED524F3-165A-425D-B380-3FA556A48005}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "DirectMath", "..\DirectMath\DirectMath.vcxproj", "{6A74ECF1-48A0-40F2-B1E5-28341FA96DC1}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,8 +23,19 @@ Global
 		{5ED524F3-165A-425D-B380-3FA556A48005}.Release|x64.Build.0 = Release|x64
 		{5ED524F3-165A-425D-B380-3FA556A48005}.Release|x86.ActiveCfg = Release|Win32
 		{5ED524F3-165A-425D-B380-3FA556A48005}.Release|x86.Build.0 = Release|Win32
+		{6A74ECF1-48A0-40F2-B1E5-28341FA96DC1}.Debug|x64.ActiveCfg = Debug|x64
+		{6A74ECF1-48A0-40F2-B1E5-28341FA96DC1}.Debug|x64.Build.0 = Debug|x64
+		{6A74ECF1-48A0-40F2-B1E5-28341FA96DC1}.Debug|x86.ActiveCfg = Debug|Win32
+		{6A74ECF1-48A0-40F2-B1E5-28341FA96DC1}.Debug|x86.Build.0 = Debug|Win32
+		{6A74ECF1-48A0-40F2-B1E5-28341FA96DC1}.Release|x64.ActiveCfg = Release|x64
+		{6A74ECF1-48A0-40F2-B1E5-28341FA96DC1}.Release|x64.Build.0 = Release|x64
+		{6A74ECF1-48A0-40F2-B1E5-28341FA96DC1}.Release|x86.ActiveCfg = Release|Win32
+		{6A74ECF1-48A0-40F2-B1E5-28341FA96DC1}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {275D9F2D-44F5-4312-BF3D-3E9F7361182E}
 	EndGlobalSection
 EndGlobal

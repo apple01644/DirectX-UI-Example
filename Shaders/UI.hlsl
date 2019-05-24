@@ -1,66 +1,43 @@
-Texture2D    gTexture : register(t0);
-
-SamplerState gsamPointWrap        : register(s0);
-SamplerState gsamPointClamp       : register(s1);
-SamplerState gsamLinearWrap       : register(s2);
-SamplerState gsamLinearClamp      : register(s3);
-SamplerState gsamAnisotropicWrap  : register(s4);
-SamplerState gsamAnisotropicClamp : register(s5);
+#include "Struct.hlsl"
 
 cbuffer cbPerObject : register(b0)
 {
     float4x4 gWorld;
-};
-
-cbuffer cbPass : register(b1)
-{
-    float4x4 gView;
-    float4x4 gInvView;
-    float4x4 gProj;
-    float4x4 gInvProj;
-    float4x4 gViewProj;
-    float4x4 gInvViewProj;
-    float3 gEyePosW;
-    float cbPerObjectPad1;
-    float2 gRenderTargetSize;
-    float2 gInvRenderTargetSize;
-    float gNearZ;
-    float gFarZ;
-    float gTotalTime;
-    float gDeltaTime;
-    float4 gAmbientLight;
-
-	float4 gFogColor;
-	float gFogStart;
-	float gFogRange;
-	float2 cbPerObjectPad2;
-
-	Material gMaterial[MAX_MATERIAL];
+	float4 gColor;
 };
 
 struct VertexIn
 {
-	float3 rPos    : POSITION;
-	float2 rTex    : TEXCOORD;
+	float2 PosL    : POSITION;
 };
 
 struct VertexOut
 {
 	float4 PosH    : SV_POSITION;
-	float2 TexC    : TEXCOORD;
+	float4 Color : COLOR;
 };
 
 VertexOut VS(VertexIn vin)
 {
 	VertexOut vout = (VertexOut)0.0f;
-    vout.PosH = vin.rPos;
-	vout.TexC = rTex;
+	
+	float2 _2D_POS = vin.PosL;
+	
+	vout.Color = gColor;
+	
+	_2D_POS = mul(float4(vin.PosL, 0.f, 1.f), gWorld).xy;
+	//vout.Color.x += gWorld[0].w / 32;
+	_2D_POS.x += gWorld[0].w;
+	_2D_POS.y += gWorld[1].w;
+	
+	vout.PosH = float4(_2D_POS / gRenderTargetSize * float2(2,-2) + float2(-1, 1), 0.f, 1.0f);
+	
     return vout;
 }
 
 float4 PS(VertexOut pin) : SV_Target
 {
-    return float4(0, 0, 0, 1);
+    return pin.Color;
 }
 
 

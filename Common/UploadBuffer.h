@@ -50,7 +50,7 @@ public:
         return mUploadBuffer.Get();
     }
 
-    void CopyData(int elementIndex, const T& data)
+    void CopyData(size_t elementIndex, const T& data)
     {
         memcpy(&mMappedData[elementIndex*mElementByteSize], &data, sizeof(T));
     }

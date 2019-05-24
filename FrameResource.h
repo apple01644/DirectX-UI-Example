@@ -10,7 +10,6 @@ struct ObjectConstants
 	DirectX::XMFLOAT4X4 TexTransform = MathHelper::Identity4x4();
 };
 
-
 struct PassConstants
 {
     DirectX::XMFLOAT4X4 View = MathHelper::Identity4x4();
@@ -40,8 +39,7 @@ struct PassConstants
     // indices [NUM_DIR_LIGHTS+NUM_POINT_LIGHTS, NUM_DIR_LIGHTS+NUM_POINT_LIGHT+NUM_SPOT_LIGHTS)
     // are spot lights for a maximum of MaxLights per object.
     //Light Lights[MaxLights];
-	const static size_t gMatirialSize = 3;
-	MaterialConstants gMaterial[gMatirialSize];
+	MaterialConstants gMaterial[16];
 };
 
 struct Vertex
@@ -71,6 +69,13 @@ struct VertexForMap
 	VertexForMap(const UINT& _x, const UINT& _y, DirectX::XMFLOAT3 _pos, DirectX::XMFLOAT3 _normal, DirectX::XMFLOAT2 _tex) : 
 		x(_x), y(_y), Pos(_pos), Normal(_normal), TexC(_tex) {}
 };
+struct UIPoint {
+	DirectX::XMFLOAT2 Pos;
+};
+struct UIConsts {
+	DirectX::XMFLOAT4X4 World;
+	DirectX::XMFLOAT4 Color;
+};
 
 // Stores the resources needed for the CPU to build the command lists
 // for a frame.  
@@ -93,6 +98,7 @@ public:
     std::unique_ptr<UploadBuffer<PassConstants>> PassCB = nullptr;
     //std::unique_ptr<UploadBuffer<MaterialConstants>> MaterialCB = nullptr;
     std::unique_ptr<UploadBuffer<ObjectConstants>> ObjectCB = nullptr;
+	std::unique_ptr<UploadBuffer<UIConsts>> UICB = nullptr;
 
     // We cannot update a dynamic vertex buffer until the GPU is done processing
     // the commands that reference it.  So each frame needs their own.

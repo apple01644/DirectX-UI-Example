@@ -1,0 +1,14 @@
+
+.outter-block {
+	width: 340px;
+	height: 120px;
+	border: 1 1 1 1;
+	background-color: #aeaeae;
+}	
+
+.inner-block {
+	margin:10 10 0 0;
+	width: 100px;
+	height: 100px;
+	border: 1 1 1 1;
+}	
